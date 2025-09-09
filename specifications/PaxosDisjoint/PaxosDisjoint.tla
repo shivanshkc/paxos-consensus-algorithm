@@ -1,4 +1,4 @@
------------------------------------------- MODULE Paxos -------------------------------------------
+-------------------------------------- MODULE PaxosDisjoint ---------------------------------------
 EXTENDS Integers, FiniteSets, TLC
 
 \* Constants come from the .cfg file.
@@ -31,7 +31,7 @@ TypeInv ==
     /\ network \subseteq
         [type: {"1A"}, src: Proposers, dst: Acceptors, ballot: Nat] \cup
         [type: {"1B"}, src: Acceptors, dst: Proposers, record: AcceptorRecord] \cup
-        [type: {"2A"}, src: Proposers, dst: Acceptors, ballot: Nat, value: Values] \cup
+        [type: {"2A"}, src: Proposers, dst: Acceptors, ballot: Nat, value: Values, valueBallot: Nat] \cup
         [type: {"2B"}, src: Acceptors, dst: Proposers, record: AcceptorRecord]
     /\ prState \in [Proposers -> Values \cup {NoValue}]
     /\ acState \in [Acceptors -> AcceptorRecord]
@@ -73,9 +73,8 @@ HighestBallot2A(msgs) ==
         \A other \in ballots2A : ballot >= other
 
 \* Helper operator to determine the value to propose
-ValueToPropose(msgsForBallot) ==
-    LET highestBallot2A == HighestBallot2A(msgsForBallot)
-    IN IF highestBallot2A = 0
+ValueToPropose(msgsForBallot, highestBallot2A) ==
+    IF highestBallot2A = 0
         THEN CHOOSE v \in Values : TRUE
         ELSE (CHOOSE m \in msgsForBallot : m.record.maxBallot2A = highestBallot2A).record.value
 
@@ -85,14 +84,16 @@ Phase2A(p) ==
     IN \E selectedBallot \in availableBallots :
         LET msgsForBallot == {m \in phase1BMessages : m.record.maxBallot1A = selectedBallot}
             respondingAcceptors == {m.src : m \in msgsForBallot}
-            proposedValue == ValueToPropose(msgsForBallot)
+            highestBallot2A == HighestBallot2A(msgsForBallot)
+            proposedValue == ValueToPropose(msgsForBallot, highestBallot2A)
         IN /\ Cardinality(msgsForBallot) >= SmallestMajoritySize
             /\ network' = (network \ msgsForBallot) \cup {[
-                type    |-> "2A",
-                src     |-> p,
-                dst     |-> a,
-                ballot  |-> selectedBallot,
-                value   |-> proposedValue] : a \in respondingAcceptors}
+                type        |-> "2A",
+                src         |-> p,
+                dst         |-> a,
+                ballot      |-> selectedBallot,
+                value       |-> proposedValue,
+                valueBallot |-> highestBallot2A + 1] : a \in respondingAcceptors}
             /\ UNCHANGED <<prState, acState, ballotGen>>
 
 ---------------------------------------------------------------------------------------------------
@@ -102,7 +103,7 @@ Phase2B(a) == \E msg \in network:
     /\ msg.dst = a
     /\ acState[a].maxBallot1A = msg.ballot
     /\ acState' = [acState EXCEPT
-        ![a].maxBallot2A = msg.ballot,
+        ![a].maxBallot2A = msg.valueBallot,
         ![a].value = msg.value]
     /\ network' = (network \ {msg}) \cup {[
         type    |-> "2B",
