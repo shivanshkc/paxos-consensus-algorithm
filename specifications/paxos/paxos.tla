@@ -23,17 +23,103 @@ VARIABLES
 
 vars == <<network, prState, acState, ballotGen>>
 
+AcceptorRecord ==
+    [maxBallot1A: Nat, maxBallot2A: Nat, value: Values \cup {NoValue}]
+
 \* Type safety.
-TypeInv == TRUE
+TypeInv ==
+    /\ network \subseteq
+        [type: {"1A"}, src: Proposers, dst: Acceptors, ballot: Nat] \cup
+        [type: {"1B"}, src: Acceptors, dst: Proposers, record: AcceptorRecord] \cup
+        [type: {"2A"}, src: Proposers, dst: Acceptors, ballot: Nat, value: Values] \cup
+        [type: {"2B"}, src: Acceptors, dst: Proposers, record: AcceptorRecord]
+    /\ prState \in [Proposers -> Values \cup {NoValue}]
+    /\ acState \in [Acceptors -> AcceptorRecord]
+    /\ ballotGen \in Nat
 
 (*************************************************************************************************)
 \* Custom Actions.
 
-Phase1A(p) == FALSE
-Phase1B(a) == FALSE
-Phase2A(p) == FALSE
-Phase2B(p) == FALSE
-Phase3(p) == FALSE
+Phase1A(p) ==
+    /\ prState[p] = NoValue
+    /\ network' = network \cup {[
+        type    |-> "1A",
+        src     |-> p,
+        dst     |-> a,
+        ballot  |-> ballotGen + 1]: a \in Acceptors}
+    /\ ballotGen' = ballotGen + 1
+    /\ UNCHANGED <<prState, acState>>
+
+Phase1B(a) == \E msg \in network:
+    /\ msg.type = "1A"
+    /\ msg.dst = a
+    /\ msg.ballot > acState[a].maxBallot1A
+    /\ acState' = [acState EXCEPT ![a].maxBallot1A = msg.ballot]
+    /\ network' = (network \ {msg}) \cup {[
+        type    |-> "1B",
+        src     |-> a,
+        dst     |-> msg.src,
+        record  |-> acState'[a]]}
+    /\ UNCHANGED <<prState, ballotGen>>
+
+---------------------------------------------------------------------------------------------------
+
+SmallestMajoritySize == (Cardinality(Acceptors) \div 2) + 1
+
+\* Helper operator to find the highest 2A ballot from a set of 1B messages
+HighestBallot2A(msgs) ==
+    LET ballots2A == {m.record.maxBallot2A : m \in msgs}
+    IN CHOOSE ballot \in ballots2A :
+        \A other \in ballots2A : ballot >= other
+
+\* Helper operator to determine the value to propose
+ValueToPropose(msgsForBallot) ==
+    LET highestBallot2A == HighestBallot2A(msgsForBallot)
+    IN IF highestBallot2A = 0
+        THEN CHOOSE v \in Values : TRUE
+        ELSE (CHOOSE m \in msgsForBallot : m.record.maxBallot2A = highestBallot2A).record.value
+
+Phase2A(p) ==
+    LET phase1BMessages == {m \in network : m.type = "1B" /\ m.dst = p}
+        availableBallots == {m.record.maxBallot1A : m \in phase1BMessages}
+    IN \E selectedBallot \in availableBallots :
+        LET msgsForBallot == {m \in phase1BMessages : m.record.maxBallot1A = selectedBallot}
+            respondingAcceptors == {m.src : m \in msgsForBallot}
+            proposedValue == ValueToPropose(msgsForBallot)
+        IN /\ Cardinality(msgsForBallot) >= SmallestMajoritySize
+            /\ network' = (network \ msgsForBallot) \cup {[
+                type    |-> "2A",
+                src     |-> p,
+                dst     |-> a,
+                ballot  |-> selectedBallot,
+                value   |-> proposedValue] : a \in respondingAcceptors}
+            /\ UNCHANGED <<prState, acState, ballotGen>>
+
+---------------------------------------------------------------------------------------------------
+
+Phase2B(a) == \E msg \in network:
+    /\ msg.type = "2A"
+    /\ msg.dst = a
+    /\ acState[a].maxBallot1A = msg.ballot
+    /\ acState' = [acState EXCEPT
+        ![a].maxBallot2A = msg.ballot,
+        ![a].value = msg.value]
+    /\ network' = (network \ {msg}) \cup {[
+        type    |-> "2B",
+        src     |-> a,
+        dst     |-> msg.src,
+        record  |-> acState'[a]]}
+    /\ UNCHANGED <<prState, ballotGen>>
+
+Phase3(p) ==
+    LET phase2BMessages == {m \in network : m.type = "2B" /\ m.dst = p}
+        availableBallots == {m.record.maxBallot1A : m \in phase2BMessages}
+    IN \E selectedBallot \in availableBallots :
+        LET msgsForBallot == {m \in phase2BMessages : m.record.maxBallot1A = selectedBallot}
+            respondingAcceptors == {m.src : m \in msgsForBallot}
+        IN  /\ Cardinality(msgsForBallot) >= SmallestMajoritySize
+            /\ prState' = [prState EXCEPT ![p] = (CHOOSE m \in msgsForBallot : TRUE).record.value]
+            /\ UNCHANGED <<network, acState, ballotGen>>
 
 (*************************************************************************************************)
 \* System Actions.
@@ -71,7 +157,7 @@ Liveness == <>[](\A p1, p2 \in Proposers:
     /\ prState[p1] = prState[p2])
 
 \* Contraint to limit state space.
-Constraint == ballotGen < 5
+Constraint == ballotGen < 4
 
 (* Temporal formula of the spec. *)
 Spec == /\ Init
